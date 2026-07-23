@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" \"Assignment 1.py\")"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "pycharm"
+  ]
+}
