@@ -9,3 +9,7 @@ through high-quality educational resources, including publicly available univers
 
 This repository is a work in progress. My goal is to continuously develop and publish practical projects that demonstrate my learning 
 journey on these topics.
+
+Current status:
+- Electricity_Markets_A1.py: code for the first assignment corresponding to the DTU Course Elecricity Markets in Renewables Energy
+- Electricity_Markets_A1.ipynb: code and explanation for the first assignment corresponding to the DTU Course Elecricity Markets in Renewables Energy
