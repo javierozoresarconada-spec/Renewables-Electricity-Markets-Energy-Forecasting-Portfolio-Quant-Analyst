@@ -11,5 +11,5 @@ This repository is a work in progress. My goal is to continuously develop and pu
 journey on these topics.
 
 Current status:
-- Electricity_Markets_A1.py: code for the first assignment corresponding to the DTU Course Elecricity Markets in Renewables Energy
-- Electricity_Markets_A1.ipynb: code and explanation for the first assignment corresponding to the DTU Course Elecricity Markets in Renewables Energy
+- Electricity_Markets_A1.py: code for the first assignment corresponding to the DTU Course Electricity Markets in Renewables Energy
+- Electricity_Markets_A1.ipynb: code and explanation for the first assignment corresponding to the DTU Course Electricity Markets in Renewables Energy
