@@ -424,3 +424,301 @@ print("\nDoes the hourly price equal a generator's offer price?")
 print(check_table.to_string(index=False))
 print(f"\nHours where the price does NOT match any generator's offer price: "
       f"{int((~price_matches_generator).sum())} / {T}")
+
+# %% STEP 3: NETWORK CONSTRAINTS (NODAL MARKET CLEARING)
+#
+# How to read this section: Step 3 extends STEP 1 (single hour, no storage --
+# not Step 2), replacing the single "copper-plate" system-wide power balance
+# with the real IEEE 24-bus transmission network (Lecture 3). Every producer
+# and demand is now pinned to a specific node ("Location_node" in the Excel
+# data), and power can only move between nodes through transmission lines,
+# each with its own capacity limit.
+
+# --- Step 3.1: map every producer/demand to its node, and load line data ---
+# Node labels in the data are 1..24; we convert to 0-indexed positions (0..23)
+# to use directly as array/matrix indices.
+n_nodes = 24
+ref_node = 0  # node 1 (index 0) is the reference/slack bus: theta_ref = 0
+
+supplier_node = np.concatenate([
+    gens["Location_node"].to_numpy(),
+    wind["Location_node"].to_numpy(),
+]) - 1
+demand_node = demands["Location_node"].to_numpy() - 1
+
+lines_from = lines["From_node"].to_numpy() - 1
+lines_to = lines["To_node"].to_numpy() - 1
+lines_B = lines["Susceptance_puw"].to_numpy()
+lines_cap = lines["Capacity_MW"].to_numpy()
+n_lines = len(lines)
+
+
+# --- Step 3.2: the nodal market-clearing function ---
+# Linearized ("DC") power flow (Lecture 3): the flow on line l is
+#   f_l = B_l * (theta_from(l) - theta_to(l))                              -- flow definition
+# and the single system-wide balance of Step 1 is replaced by ONE balance
+# equation PER NODE n:
+#   sum_{d at n} p_d  -  sum_{g at n} p_g  +  sum_{l: from=n} f_l  -  sum_{l: to=n} f_l  =  0   : lambda_n
+# (demand and outgoing flow are "uses" of power at node n; generation and
+# incoming flow are "sources" of power at node n). The dual variable of node
+# n's balance equation, lambda_n, is that node's nodal price (LMP).
+def solve_nodal_market(supplier_cost, supplier_capacity, supplier_node,
+                        demand_bid, demand_maxload, demand_node,
+                        lines_from, lines_to, lines_B, lines_cap,
+                        n_nodes, ref_node=0):
+    """Clear a single-hour market over the full nodal network (DC power flow).
+
+    Extends Step 1 by replacing the single system-wide power balance with one
+    balance equation per node, linked by line flows bounded by +-line capacity.
+    """
+    n_sup = len(supplier_cost)
+    n_dem = len(demand_bid)
+    n_lines = len(lines_from)
+
+    # Variable layout: [ p_sup (n_sup) | p_dem (n_dem) | theta (n_nodes) | f (n_lines) ]
+    i_sup, i_dem = 0, n_sup
+    i_theta = i_dem + n_dem
+    i_f = i_theta + n_nodes
+    n_var = i_f + n_lines
+
+    c = np.concatenate([supplier_cost, -demand_bid, np.zeros(n_nodes), np.zeros(n_lines)])
+
+    bounds = (
+        [(0, cap) for cap in supplier_capacity]
+        + [(0, load) for load in demand_maxload]
+        + [(0, 0) if n == ref_node else (None, None) for n in range(n_nodes)]
+        + [(-cap, cap) for cap in lines_cap]
+    )
+
+    n_eq = n_nodes + n_lines  # n_nodes power-balance rows, then n_lines flow-definition rows
+    A_eq = np.zeros((n_eq, n_var))
+    b_eq = np.zeros(n_eq)
+
+    for g in range(n_sup):
+        A_eq[supplier_node[g], i_sup + g] = -1.0
+    for d in range(n_dem):
+        A_eq[demand_node[d], i_dem + d] = 1.0
+    for l in range(n_lines):
+        A_eq[lines_from[l], i_f + l] = 1.0   # flow leaving its "from" node
+        A_eq[lines_to[l], i_f + l] = -1.0    # flow arriving at its "to" node
+
+        row = n_nodes + l
+        A_eq[row, i_f + l] = 1.0
+        A_eq[row, i_theta + lines_from[l]] = -lines_B[l]
+        A_eq[row, i_theta + lines_to[l]] = lines_B[l]
+
+    result = linprog(c=c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
+    if not result.success:
+        raise RuntimeError(f"Nodal market-clearing LP did not solve: {result.message}")
+
+    return {
+        "p_sup": result.x[i_sup:i_dem],
+        "p_dem": result.x[i_dem:i_theta],
+        "theta": result.x[i_theta:i_f],
+        "flow": result.x[i_f:i_f + n_lines],
+        "nodal_price": -result.eqlin.marginals[:n_nodes],
+        "social_welfare": -result.fun,
+    }
+
+
+# --- Step 3.3: solve the base case and check whether nodal prices are identical ---
+nodal_base = solve_nodal_market(
+    supplier_cost, supplier_capacity, supplier_node,
+    demand_bid, demand_maxload, demand_node,
+    lines_from, lines_to, lines_B, lines_cap, n_nodes, ref_node,
+)
+
+n_distinct_prices = len(np.unique(nodal_base["nodal_price"].round(2)))
+print(f"\nNodal prices: {n_distinct_prices} distinct value(s) across {n_nodes} nodes "
+      f"(range {nodal_base['nodal_price'].min():.2f} - {nodal_base['nodal_price'].max():.2f} $/MWh)")
+print(f"Nodal social welfare: {nodal_base['social_welfare']:,.2f} $ "
+      f"(Step 1 copper-plate social welfare was {social_welfare:,.2f} $)")
+
+# %% STEP 3: SENSITIVITY ANALYSIS ON A TRANSMISSION LINE'S CAPACITY
+#
+# Identify the most heavily loaded line(s) in the base case, then artificially
+# shrink the most-loaded one's capacity to force congestion, and see what
+# happens to the nodal prices.
+
+utilization = np.abs(nodal_base["flow"]) / lines_cap
+lines_report = pd.DataFrame({
+    "From": lines["From_node"], "To": lines["To_node"], "Capacity_MW": lines_cap,
+    "Flow_MW": nodal_base["flow"].round(2), "Utilization": utilization.round(3),
+}).sort_values("Utilization", ascending=False)
+print("\nMost heavily loaded lines in the base case:")
+print(lines_report.head(5).to_string(index=False))
+
+most_loaded_line = int(np.argmax(utilization))
+stressed_cap = lines_cap.copy()
+stressed_cap[most_loaded_line] = 0.3 * lines_cap[most_loaded_line]  # shrink to 30% of its original capacity
+
+nodal_stressed = solve_nodal_market(
+    supplier_cost, supplier_capacity, supplier_node,
+    demand_bid, demand_maxload, demand_node,
+    lines_from, lines_to, lines_B, stressed_cap, n_nodes, ref_node,
+)
+
+print(f"\nAfter shrinking line {lines['From_node'].iloc[most_loaded_line]}->"
+      f"{lines['To_node'].iloc[most_loaded_line]} from {lines_cap[most_loaded_line]:.0f} MW "
+      f"to {stressed_cap[most_loaded_line]:.0f} MW:")
+print(f"  Distinct nodal prices: {len(np.unique(nodal_stressed['nodal_price'].round(2)))} "
+      f"(range {nodal_stressed['nodal_price'].min():.2f} - {nodal_stressed['nodal_price'].max():.2f} $/MWh)")
+print(f"  Social welfare: {nodal_stressed['social_welfare']:,.2f} $ "
+      f"(base case: {nodal_base['social_welfare']:,.2f} $)")
+
+# %% STEP 3: ZONAL MARKET CLEARING
+#
+# Same 2-zone split used in Lecture 3's own example for this exact network:
+# Zone 1 = nodes 1-13, Zone 2 = nodes 14-24. The ATC between the zones is the
+# total capacity of every line that crosses the zone boundary.
+
+supplier_zone = (supplier_node >= 13).astype(int)  # 0 = zone "1-13", 1 = zone "14-24"
+demand_zone = (demand_node >= 13).astype(int)
+crosses_zones = (lines_from < 13) != (lines_to < 13)
+atc_base = lines_cap[crosses_zones].sum()
+print(f"\nLines crossing the zone boundary: {crosses_zones.sum()}, "
+      f"ATC (sum of their capacities) = {atc_base:.0f} MW")
+
+
+def solve_zonal_market(supplier_cost, supplier_capacity, supplier_zone,
+                        demand_bid, demand_maxload, demand_zone, atc):
+    """Clear a single-hour, 2-zone market: zones 0 and 1, linked by a single
+    interconnector with a symmetric Available Transfer Capacity (ATC).
+
+    Extends Step 1 by replacing the single system-wide balance with one
+    balance equation per zone, linked by one inter-zonal transfer variable
+    bounded by +-atc (no per-line detail within each zone).
+    """
+    n_sup = len(supplier_cost)
+    n_dem = len(demand_bid)
+    i_sup, i_dem = 0, n_sup
+    i_f = i_dem + n_dem
+    n_var = i_f + 1
+
+    c = np.concatenate([supplier_cost, -demand_bid, [0.0]])
+    bounds = (
+        [(0, cap) for cap in supplier_capacity]
+        + [(0, load) for load in demand_maxload]
+        + [(-atc, atc)]
+    )
+
+    A_eq = np.zeros((2, n_var))
+    b_eq = np.zeros(2)
+    for g in range(n_sup):
+        A_eq[supplier_zone[g], i_sup + g] = -1.0
+    for d in range(n_dem):
+        A_eq[demand_zone[d], i_dem + d] = 1.0
+    A_eq[0, i_f] = 1.0    # zone 0: ... + f01 = 0  (f01 = export from zone 0 to zone 1)
+    A_eq[1, i_f] = -1.0   # zone 1: ... - f01 = 0
+
+    result = linprog(c=c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
+    if not result.success:
+        raise RuntimeError(f"Zonal market-clearing LP did not solve: {result.message}")
+
+    return {
+        "p_sup": result.x[i_sup:i_dem],
+        "p_dem": result.x[i_dem:i_f],
+        "flow_01": result.x[i_f],
+        "zonal_price": -result.eqlin.marginals[:2],
+        "social_welfare": -result.fun,
+    }
+
+
+zonal_base = solve_zonal_market(
+    supplier_cost, supplier_capacity, supplier_zone,
+    demand_bid, demand_maxload, demand_zone, atc_base,
+)
+print(f"Zonal prices at ATC={atc_base:.0f} MW: Zone 1-13 = {zonal_base['zonal_price'][0]:.2f} $/MWh, "
+      f"Zone 14-24 = {zonal_base['zonal_price'][1]:.2f} $/MWh")
+print(f"Zonal social welfare: {zonal_base['social_welfare']:,.2f} $ "
+      f"(nodal: {nodal_base['social_welfare']:,.2f} $, copper-plate: {social_welfare:,.2f} $)")
+
+# --- ATC sensitivity: how do zonal prices react to a tighter/looser interconnector? ---
+atc_scenarios = {"0.25x ATC": 0.25 * atc_base, "1x ATC (base)": atc_base, "4x ATC": 4 * atc_base}
+atc_rows = []
+for label, atc_value in atc_scenarios.items():
+    z = solve_zonal_market(supplier_cost, supplier_capacity, supplier_zone,
+                            demand_bid, demand_maxload, demand_zone, atc_value)
+    atc_rows.append({"Scenario": label, "ATC_MW": atc_value,
+                      "Price_zone1_13": z["zonal_price"][0], "Price_zone14_24": z["zonal_price"][1],
+                      "Social_welfare": z["social_welfare"]})
+print("\nZonal prices for different ATC values:")
+print(pd.DataFrame(atc_rows).round(2).to_string(index=False))
+
+# %% STEP 3: NODAL vs. ZONAL -- PROFITS, WELFARE AND EX-POST FEASIBILITY
+#
+# How to read this section: at the BASE ATC (1650 MW) the network is not
+# congested, so nodal and zonal give identical results -- not a very
+# informative comparison. To actually see how nodal and zonal frameworks can
+# differ, we redo this comparison at the STRESSED ATC (0.25x, from the
+# sensitivity table above), where the zone interconnector genuinely binds.
+#
+# We compare producer profits (conventional vs. renewable) and social welfare
+# between the nodal and zonal outcomes, then check whether the zonal
+# dispatch -- which ignores individual line limits inside each zone -- is
+# actually feasible on the real network, by solving the (non-optimization)
+# DC power-flow equations for the flows that dispatch would actually cause.
+
+zonal_stressed = solve_zonal_market(
+    supplier_cost, supplier_capacity, supplier_zone,
+    demand_bid, demand_maxload, demand_zone, 0.25 * atc_base,
+)
+
+is_wind = np.arange(n_sup) >= len(gens)
+nodal_producer_profit = (nodal_base["nodal_price"][supplier_node] - supplier_cost) * nodal_base["p_sup"]
+zonal_producer_profit = (zonal_stressed["zonal_price"][supplier_zone] - supplier_cost) * zonal_stressed["p_sup"]
+
+profit_comparison = pd.DataFrame({
+    "Nodal_profit_USD": [nodal_producer_profit[~is_wind].sum(), nodal_producer_profit[is_wind].sum()],
+    "Zonal_profit_USD": [zonal_producer_profit[~is_wind].sum(), zonal_producer_profit[is_wind].sum()],
+}, index=["Conventional generators", "Wind farms"]).round(2)
+print("\nProducer profit, nodal (uncongested) vs. zonal at a stressed 0.25x ATC:")
+print(profit_comparison)
+print(f"\nSocial welfare -- nodal: {nodal_base['social_welfare']:,.2f} $, "
+      f"zonal (stressed ATC): {zonal_stressed['social_welfare']:,.2f} $, "
+      f"difference: {nodal_base['social_welfare'] - zonal_stressed['social_welfare']:,.2f} $")
+
+
+def compute_dc_power_flow(injections, lines_from, lines_to, lines_B, n_nodes, ref_node=0):
+    """Given a FIXED net injection at every node (generation - demand), solve
+    the linear DC power-flow equations (Kirchhoff's laws, not an optimization)
+    for the voltage angles and the resulting line flows.
+    """
+    B_mat = np.zeros((n_nodes, n_nodes))
+    for l in range(len(lines_from)):
+        n, m, b = lines_from[l], lines_to[l], lines_B[l]
+        B_mat[n, n] += b
+        B_mat[m, m] += b
+        B_mat[n, m] -= b
+        B_mat[m, n] -= b
+
+    keep = [n for n in range(n_nodes) if n != ref_node]
+    theta = np.zeros(n_nodes)
+    theta[keep] = np.linalg.solve(B_mat[np.ix_(keep, keep)], injections[keep])
+
+    flow = lines_B * (theta[lines_from] - theta[lines_to])
+    return theta, flow
+
+
+# Net injection at every node implied by the STRESSED ZONAL dispatch (generation - demand)
+injection = np.zeros(n_nodes)
+for g in range(n_sup):
+    injection[supplier_node[g]] += zonal_stressed["p_sup"][g]
+for d in range(n_dem):
+    injection[demand_node[d]] -= zonal_stressed["p_dem"][d]
+
+_, implied_flow = compute_dc_power_flow(injection, lines_from, lines_to, lines_B, n_nodes, ref_node)
+overload = np.abs(implied_flow) - lines_cap
+overloaded = overload > 1e-6
+
+print(f"\nEx-post feasibility check of the stressed-ATC zonal dispatch on the real (nodal) network:")
+print(f"Lines that would be overloaded: {int(overloaded.sum())} / {n_lines}")
+if overloaded.any():
+    redispatch_table = pd.DataFrame({
+        "From": lines["From_node"][overloaded], "To": lines["To_node"][overloaded],
+        "Capacity_MW": lines_cap[overloaded], "Implied_flow_MW": implied_flow[overloaded].round(2),
+        "Overload_MW": overload[overloaded].round(2),
+    })
+    print(redispatch_table.to_string(index=False))
+    print(f"Total overload across all lines: {overload[overloaded].sum():,.2f} MW "
+          f"-- an approximate lower bound on the re-dispatch this zonal outcome would require.")
