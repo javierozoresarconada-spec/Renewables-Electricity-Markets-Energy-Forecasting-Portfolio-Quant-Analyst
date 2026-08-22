@@ -1,10 +1,8 @@
 """
 Value at Risk (VaR) 99% on an FX Exposure Book -- Parametric vs. Monte Carlo
 
-This is a plain-.py mirror of VaR99.ipynb, using PyCharm's "#%%" cell markers
-(Scientific Mode). Each "#%%" starts a new cell you can run individually with
-Ctrl+Enter (or the green run arrow next to it) inside the Python Console,
-and inspect every variable afterwards in the Variables panel below the console.
+This is a plain-.py mirror of VaR99.ipynb.
+
 
 See VaR99.ipynb for the full write-up (markdown explanations + LaTeX formulas).
 This file only carries the code, with short comments.
@@ -94,9 +92,9 @@ print(f"Parametric 1-day VaR99: ${var_parametric:,.0f}  "
 
 #%% 6. Method 2 -- Monte Carlo VaR
 n_sims = 100_000
-L = np.linalg.cholesky(Sigma)
+L = np.linalg.cholesky(Sigma)  # L: matrix such that L @ L.T = Sigma (used to inject the right correlations into Z)
 
-Z = np.random.standard_normal((n_sims, len(e)))
+Z = np.random.standard_normal((n_sims, len(e)))  # Z: independent draws, mean 0, std I (identity -> uncorrelated)
 sim_returns = Z @ L.T                 # correlated simulated daily returns
 sim_pnl = sim_returns @ e             # simulated portfolio P&L, in USD
 
