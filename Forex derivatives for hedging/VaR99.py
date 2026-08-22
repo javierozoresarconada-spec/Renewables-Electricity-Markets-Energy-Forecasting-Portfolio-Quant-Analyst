@@ -21,6 +21,8 @@ plt.rcParams["figure.figsize"] = (10, 4)
 plt.ion()  # interactive mode: plt.show() below returns immediately instead of blocking the console
 np.random.seed(42)
 
+market_days = 252  # approx. number of trading days in a year, used to annualise daily volatility
+
 #%% 2. Download FX data (Yahoo Finance, no API key needed)
 tickers = ["EURUSD=X", "GBPUSD=X", "USDJPY=X"]
 
@@ -56,14 +58,14 @@ notional_gbp = 6_000_000    # long GBP receivable
 notional_jpy = 500_000_000  # short JPY payable
 
 exposures = pd.Series({
-    "EURUSD": notional_eur * spot["EURUSD"],           # long EUR -> long EURUSD
+    "EURUSD": notional_eur * spot["EURUSD"],            # long EUR -> long EURUSD
     "GBPUSD": notional_gbp * spot["GBPUSD"],            # long GBP -> long GBPUSD
     "USDJPY": notional_jpy / spot["USDJPY"],            # short JPY payable -> long USDJPY (inverted quoting, see notebook Section 3)
 }, name="USD exposure")
 
 e = exposures.values  # dollar-delta vector, one entry per FX rate
 
-display_df = exposures.to_frame()
+display_df = exposures.to_frame() # Convert series to dataframe
 display_df["% of gross exposure"] = 100 * display_df["USD exposure"] / display_df["USD exposure"].abs().sum()
 display_df
 
@@ -71,7 +73,7 @@ display_df
 returns = np.log(prices / prices.shift(1)).dropna()
 
 print("Annualised volatility (%):")
-print((returns.std() * np.sqrt(252) * 100).round(2))
+print((returns.std() * np.sqrt(market_days) * 100).round(2))
 
 print("\nCorrelation matrix:")
 returns.corr().round(2)
