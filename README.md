@@ -16,3 +16,4 @@ Current status:
     - Main content: Assignmnet 1 aims to build a day-ahead electricity market-clearing model from scratch on a chosen power system case study (here, the IEEE 24-bus Reliability Test System), progressively adding realism across six steps: a single-hour copper-plate market, a 24-hour version with energy storage, transmission network constraints (nodal vs. zonal pricing), an equilibrium/KKT reformulation, a balancing market, and a reserve market. The goal is to compute and interpret market-clearing prices, social welfare, and the profits/utilities of producers and demands under each setting, verifying results analytically via the KKT conditions.
 - Forex derivatives for hedging:
     - VaR99: Value at Risk at 99% probability
+    - DV01: Dollar Value at 1bp
