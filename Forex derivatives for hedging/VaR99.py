@@ -175,5 +175,4 @@ plt.show()
 #%% 9. Keep all figures open when this file is run as a full script
 # (not needed when running cell-by-cell in the console, since the console stays
 # alive on its own -- this only matters if you hit "Run" on the whole file.)
-if __name__ == "__main__":
-    plt.show(block=True)
+
